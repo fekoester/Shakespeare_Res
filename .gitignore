@@ -1,0 +1,22 @@
+# Byte-compiled
+__pycache__/
+*.py[cod]
+
+# Virtual envs
+venv/
+.venv/
+env/
+
+# Checkpoints & results
+checkpoints/
+results_*.csv
+
+# PyTorch artifacts
+*.pth
+
+# Logs
+*.log
+
+# IDE/editor
+.vscode/
+.idea/
