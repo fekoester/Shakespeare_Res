@@ -1,8 +1,11 @@
 """
-Neural-net-generated attention weights on top of a reservoir.
+Attention-enhanced reservoir: a small network generates, from the reservoir state itself, the
+weights W(r) of a readout layer h = W(r) r (a per-input hypernetwork readout), followed by a
+linear classifier. The reservoir is the same frozen extractor as in the classic model.
 """
 
-import torch, torch.nn as nn
+import torch.nn as nn
+
 from .reservoir import _ReservoirExtractor
 
 __all__ = ["AttReservoirNet"]
@@ -26,9 +29,9 @@ class _DynAttentionHead(nn.Module):
         return self.classifier(out)
 
 class AttReservoirNet(nn.Module):
-    def __init__(self, vocab_size, embed_size, reservoir_size, hidden_size):
+    def __init__(self, vocab_size, embed_size, reservoir_size, hidden_size, **reservoir_kw):
         super().__init__()
-        self.extractor = _ReservoirExtractor(vocab_size, embed_size, reservoir_size)
+        self.extractor = _ReservoirExtractor(vocab_size, embed_size, reservoir_size, **reservoir_kw)
         self.head = _DynAttentionHead(reservoir_size, hidden_size, vocab_size)
 
     def forward(self, x):

@@ -2,13 +2,15 @@
 Shared helpers: seeding, parameter counting, training/eval loops.
 """
 
-import math, random, hashlib, torch, numpy as np
-from torch.amp import autocast, GradScaler
-from torch.utils.data import DataLoader
+import hashlib
+import random
+from contextlib import nullcontext
 
+import numpy as np
+import torch
 from tqdm import tqdm
 
-__all__ = ["set_seed", "get_hash", "count_parameters", "run_epoch"]
+__all__ = ["set_seed", "get_hash", "count_parameters", "amp_context", "run_epoch"]
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -22,7 +24,14 @@ def get_hash(hparams: dict, length=8) -> str:
     return hashlib.sha1(pairs.encode()).hexdigest()[:length]
 
 def count_parameters(model):
+    """Trainable parameters (frozen reservoir, embedding and LayerNorm are excluded)."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def amp_context(device):
+    """bf16 autocast on CUDA only (on CPU it is slower and less accurate)."""
+    dev = torch.device(device)
+    return torch.autocast("cuda", dtype=torch.bfloat16) if dev.type == "cuda" else nullcontext()
 
 def run_epoch(
     model, dataloader, criterion, optimizer=None, scaler=None, device="cpu"
@@ -37,14 +46,18 @@ def run_epoch(
             if is_train:
                 optimizer.zero_grad()
 
-            with autocast(device_type=device):
+            with amp_context(device):
                 logits = model(X)
-                loss = criterion(logits, y)
+                loss = criterion(logits.float(), y)
 
             if is_train:
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    optimizer.step()
 
             total_loss += loss.item()
 

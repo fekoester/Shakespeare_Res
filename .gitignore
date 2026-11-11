@@ -20,3 +20,7 @@ results_*.csv
 # IDE/editor
 .vscode/
 .idea/
+
+# test scratch
+tests/_orig_models/
+results/runs/
