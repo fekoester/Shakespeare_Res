@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """
-Bits per character vs trainable parameters for the three model families on Shakespeare, using the
-v0.1 sweep configurations, an equal step budget and one learning rate for all.
+Bits per character vs trainable parameters for the three model families on Shakespeare (the v0.1 /
+paper sweep configurations).
 
-    python benchmark.py --steps 2000 --batch 256 --lr 3e-3 --out results
+  --protocol paper   the setup of the paper (Adam 1e-4, batch 1024, 5 train shards x 5 passes, last
+                     sixth for testing). This is the comparison to run; it needs a GPU for the large
+                     Transformers (the paper used an RTX 4090).
+  --protocol quick   a short CPU sanity check (2,000 steps x 256 windows, lr 3e-3). Far from converged,
+                     and the deeper post-LN Transformers do not train at this learning rate.
+
+    python benchmark.py --protocol paper --out results/paper
+    python benchmark.py --protocol quick --out results
 """
 
 import argparse
@@ -19,6 +26,9 @@ RUNS = [
     *[("att_reservoir", "", ["--model", "att_reservoir", "--res", str(r), "--hid", str(h)])
       for r, h in [(75, 13), (75, 19), (100, 20), (150, 25), (160, 30)]],
     ("att_reservoir", "v0.1 scaling", ["--model", "att_reservoir", "--res", "150", "--hid", "25", "--legacy_scaling"]),
+    ("reservoir", "multi-timescale", ["--model", "reservoir", "--res", "750", "--leak_min", "0.1"]),
+    ("att_reservoir", "multi-timescale", ["--model", "att_reservoir", "--res", "150", "--hid", "25",
+                                          "--leak_min", "0.1"]),
     *[("transformer", "", ["--model", "transformer", "--hid", str(f), "--heads", str(h), "--layers", str(L)])
       for f, h, L in [(64, 4, 4), (72, 8, 8), (128, 8, 8), (356, 8, 8), (256, 16, 16)]],
     # the deeper post-LN Transformers are unstable at the shared lr; also run them at a lower one
@@ -72,12 +82,13 @@ def radius_sweep(a, common):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--protocol", default="paper", choices=["paper", "quick"])
     ap.add_argument("--steps", type=int, default=2000)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=3e-3)
     ap.add_argument("--eval_windows", type=int, default=50_000)
     ap.add_argument("--test_windows", type=int, default=200_000)
-    ap.add_argument("--out", default="results")
+    ap.add_argument("--out", default="results/paper")
     ap.add_argument("--radii", type=float, nargs="*", default=[0.5, 0.7, 0.9, 1.0, 1.1, 1.3, 1.6],
                     help="spectral radii for the attention-reservoir sweep (empty: skip)")
     a = ap.parse_args()
@@ -85,17 +96,24 @@ def main():
     path = os.path.join(a.out, "benchmark.json")
     results = json.load(open(path)) if os.path.exists(path) else []
     done = {(r["family"], r["variant"], r["config"]) for r in results}
-    common = ["--epochs", "1", "--steps_per_epoch", str(a.steps), "--batch", str(a.batch), "--lr", str(a.lr),
-              "--eval_windows", str(a.eval_windows), "--test_windows", str(a.test_windows),
-              "--out_dir", os.path.join(a.out, "runs"), "--quiet"]
+    if a.protocol == "paper":
+        common = ["--protocol", "paper", "--out_dir", os.path.join(a.out, "runs"), "--quiet"]
+    else:
+        common = ["--epochs", "1", "--steps_per_epoch", str(a.steps), "--batch", str(a.batch), "--lr", str(a.lr),
+                  "--eval_windows", str(a.eval_windows), "--test_windows", str(a.test_windows),
+                  "--out_dir", os.path.join(a.out, "runs"), "--quiet"]
     for fam, variant, args in RUNS:
+        if a.protocol == "paper" and variant == "lr 1e-3":
+            continue  # learning-rate rescue runs only make sense for the quick check
         cfg = describe(args)
         if (fam, variant, cfg) in done:
             continue
         print(f"\n=== {FAMILY[fam]} {cfg} {variant} ===", flush=True)
-        m, _ = train.main(common + args)  # run-specific arguments win
+        extra = ["--val_frac", "0.05"] if "ridge" in args and a.protocol == "paper" else []
+        m, _ = train.main(common + args + extra)  # run-specific arguments win
         results.append({"family": fam, "variant": variant, "config": cfg, "trainable_params": m["trainable_params"],
-                        "test_bpc": m["test_bpc"], "test_acc": m["test_acc"], "val_bpc": m["val_bpc"],
+                        "test_bpc": m["test_bpc"], "test_loss_nats": m["test_loss"], "test_acc": m["test_acc"],
+                        "val_bpc": m["val_bpc"],
                         "train_time_s": m["train_time_s"], "run": m["name"]})
         with open(path, "w") as f:
             json.dump(results, f, indent=2)
@@ -148,13 +166,14 @@ def main():
     ax.set_xscale("log")
     ax.set_xlabel("trainable parameters")
     ax.set_ylabel("test bits per character (lower is better)")
-    ax.set_title(f"Shakespeare, {a.steps} steps x {a.batch} windows of 32 characters")
+    ax.set_title("Shakespeare, paper protocol" if a.protocol == "paper"
+                 else f"Shakespeare, quick CPU check ({a.steps} steps x {a.batch} windows)")
     ax.grid(alpha=0.3, which="both")
     ax.legend()
     fig.tight_layout()
     fig.savefig(os.path.join(a.out, "bpc_vs_params.png"), dpi=130)
 
-    if a.radii:
+    if a.radii and a.protocol == "quick":
         radius_sweep(a, common)
 
 

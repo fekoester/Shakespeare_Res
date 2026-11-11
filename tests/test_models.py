@@ -66,3 +66,37 @@ def test_only_readouts_are_trainable():
     m = AttReservoirNet(30, 8, 64, 10)
     assert count_parameters(m) == count_parameters(m.head)
     assert count_parameters(CharTransformer(30, 16, 2, 4, 32, 32)) > 0
+
+
+def test_multi_timescale_reservoir():
+    x = torch.randint(0, 30, (4, 32))
+    torch.manual_seed(0)
+    plain = ReservoirNet(30, 8, 64)
+    torch.manual_seed(0)
+    leaky = ReservoirNet(30, 8, 64, leak_min=0.05)
+    # same random weights, log-spaced leak rates from leak_min to 1
+    assert torch.equal(plain.extractor.R, leaky.extractor.R)
+    a = leaky.extractor.leak
+    assert a[0].item() == pytest.approx(0.05) and a[-1].item() == pytest.approx(1.0)
+    assert torch.all(a[1:] > a[:-1])
+    # slow units remember the early characters: changing the first character moves them more
+    x2 = x.clone()
+    x2[:, 0] = (x2[:, 0] + 1) % 30
+    with torch.no_grad():
+        e = leaky.extractor
+        e.norm = torch.nn.Identity()
+        d = (e(x) - e(x2)).abs().mean(0)
+    assert d[:16].mean() > d[-16:].mean()
+    with pytest.raises(ValueError):
+        ReservoirNet(30, 8, 64, leak_min=0.0)
+
+
+def test_transformer_defaults_match_v01_and_options_work():
+    torch.manual_seed(0)
+    m = CharTransformer(30, 16, 2, 4, 32, 32)
+    layer = m.transformer.layers[0]
+    assert not layer.norm_first and layer.dropout.p == 0.1
+    m2 = CharTransformer(30, 16, 2, 4, 32, 32, dropout=0.0, norm_first=True)
+    assert m2.transformer.layers[0].norm_first and m2.transformer.layers[0].dropout.p == 0.0
+    assert "pos" not in m.state_dict()  # checkpoints stay compatible with v0.1
+    assert m2(torch.randint(0, 30, (2, 32))).shape == (2, 30)

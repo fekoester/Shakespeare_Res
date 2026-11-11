@@ -59,3 +59,29 @@ def test_ridge_beats_untrained_readout(corpus, tmp_path):
     untrained, _ = train.main(common + ["--epochs", "1", "--steps_per_epoch", "1", "--lr", "1e-9"])
     assert ridge["test_bpc"] < untrained["test_bpc"] - 1.0
     assert os.path.exists(tmp_path / ridge["name"] / "model.pt")
+
+
+def test_shards_partition_the_training_text():
+    from utils.data_utils import shard_tokens
+
+    tok = torch.arange(1003)
+    shards = shard_tokens(tok, 5)
+    assert len(shards) == 5 and torch.equal(torch.cat(shards), tok)
+    assert max(len(s) for s in shards) - min(len(s) for s in shards) <= 1
+
+
+def test_paper_protocol_preset_and_explicit_override():
+    argv = ["--protocol", "paper", "--batch", "64"]
+    cfg = train.apply_protocol(train.build_parser().parse_args(argv), argv)
+    assert (cfg.lr, cfg.batch, cfg.shards, cfg.shard_epochs, cfg.val_frac) == (1e-4, 64, 5, 5, 0.0)
+    assert cfg.test_frac == pytest.approx(1 / 6)
+
+
+def test_sharded_training_without_validation(corpus, tmp_path):
+    m, _ = train.main(["--data", corpus, "--model", "att_reservoir", "--res", "32", "--hid", "8", "--seq", "16",
+                       "--emb", "8", "--shards", "3", "--shard_epochs", "2", "--steps_per_epoch", "3",
+                       "--batch", "32", "--val_frac", "0", "--test_frac", "0.2", "--leak_min", "0.1",
+                       "--warmup_steps", "5", "--test_windows", "300", "--out_dir", str(tmp_path), "--quiet"])
+    h = m["history"][0]
+    assert len(h["shards"]) == 6 and "val_loss" not in h and m["val_bpc"] is None
+    assert 0 < m["test_bpc"] < 10

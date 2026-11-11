@@ -12,88 +12,107 @@ The question is how far a frozen reservoir gets when its readout is allowed to b
 
 ## Results
 
-Setup:
-- the original sweep configurations, run on 2 CPU cores
-- 2,000 Adam steps × 256 windows, the same learning rate (3e-3) for every model
-- the best epoch is chosen on a validation split, and the test split is the last 10% of the corpus (200k test windows)
+### Reference: the paper
 
-Reproduce with `python benchmark.py`.
+The full comparison is in Köster & Uchida, *Reservoir computing as a language model*, [Phys. Rev. Applied **26**, 024051 (2026)](https://doi.org/10.1103/sd11-x3ny) ([arXiv:2507.15779](https://arxiv.org/abs/2507.15779)). It used:
+- the lowercased corpus in 6 contiguous shards, 5 for training and 1 for testing
+- 5 passes over each shard before moving to the next
+- Adam at lr 1e-4, batch 1,024, embedding size 16 for all models
+- an RTX 4090 with mixed precision
 
-![bits per character vs parameters](results/bpc_vs_params.png)
+Final test cross-entropy (PyTorch's nats; bits per character in brackets):
 
-| model | config | trainable params | test bpc ↓ | test accuracy | train time |
-|---|---|---|---|---|---|
-| Classic reservoir | R=750 | 44,309 | 3.114 | 37.9% | 2.9 min |
-| Classic reservoir, ridge readout | R=750 | 44,309 | 3.772 | **38.9%** | 5.2 min |
-| Attention-enhanced reservoir | R=75, H=13 | 15,464 | 3.056 | 37.6% | 0.2 min |
-| Attention-enhanced reservoir | R=75, H=19 | 31,124 | 2.967 | 39.1% | 0.2 min |
-| Attention-enhanced reservoir | R=100, H=20 | 45,259 | 2.952 | 39.1% | 0.2 min |
-| Attention-enhanced reservoir | R=150, H=25 | 102,809 | 2.920 | 39.6% | 0.4 min |
-| **Attention-enhanced reservoir** | R=160, H=30 | 155,459 | **2.894** | **40.6%** | 0.4 min |
-| Transformer | L=4, heads=4, ffn=64 | 15,067 | 3.122 | 36.3% | 4.1 min |
-| Transformer | L=8, heads=8, ffn=72 | 30,299 | 3.056 | 37.5% | 12.6 min |
-| Transformer | L=8, heads=8, ffn=128 | 45,083 | 3.115 (3.253 at lr 1e-3) | 35.9% | 14.2 min |
-| Transformer | L=8, heads=8, ffn=356 | 105,275 | diverged (3.276 at lr 1e-3) | – | 20.4 min |
-| Transformer | L=16, heads=16, ffn=256 | 155,803 | diverged (also at lr 1e-3) | – | 57 min |
+| model | test loss |
+|---|---|
+| Transformer, largest configuration | **1.67** (≈2.41 bpc) |
+| Attention-enhanced reservoir | 1.73 (≈2.50 bpc) |
+| Classic reservoir | 1.81 (≈2.61 bpc) |
 
-What this says:
+Trained properly, the Transformer predicts best. The attention-enhanced reservoir comes close at a fraction of the training cost, and both reservoir models overfit more than the Transformer.
 
-- **The attention-enhanced reservoir wins at every size.** It has the lowest bits per character for a given parameter count. With 15k parameters it matches the 30k-parameter Transformer, and its training takes seconds rather than minutes, because only the readout network gets gradients.
-- **An input-dependent readout beats a bigger linear one.** At 45k parameters the attention-enhanced reservoir (R=100) reaches 2.95 bpc, against 3.11 for the classic reservoir (R=750) and 3.12 for the Transformer.
-- **The deeper Transformers did not train under this budget.** They use post-LayerNorm layers, have no warmup, and their heads are tiny (embedding 16 split into 8–16 heads of size 1–2). At lr 3e-3 the two largest collapse to predicting character frequencies. At lr 1e-3 the 8-layer ones train, but more slowly than at 3e-3, and the 16-layer one still collapses. The plot shows the better of the two learning rates for each Transformer. Their numbers are a statement about this short CPU budget, not about Transformers in general.
-- **The ridge readout has the best accuracy of the classic reservoir runs but poor bpc.** Least squares on one-hot targets ranks the right character well but gives badly calibrated probabilities, even after fitting a temperature on validation data.
-- All of these are tiny models with a 32-character context and a few minutes of CPU training. Good character-level models reach 1.3–2 bpc on this kind of data.
+Reproduce it with the paper's protocol (needs a GPU for the large Transformers):
 
-### Spectral radius
-
-v0.1 divided the reservoir matrices by 0.9 instead of multiplying, so the spectral radius was **≈1.13**, not 0.9. The radius is now set exactly with `--spectral_radius` (default 0.9), and `--legacy_scaling` reproduces the old weights bit for bit. The old value turns out to be a good one. In the sweep below (attention-enhanced reservoir, R=150, H=25), the optimum sits around ρ ≈ 1.1 (2.896 bpc), compared with 2.920 at 0.9, 3.067 at 0.5 and 2.994 at 1.6. The v0.1 run lands at 2.894. With only 32 steps per window and a LayerNorm after the reservoir, the model doesn't need the echo-state property; a slightly supercritical, more strongly nonlinear reservoir simply works a bit better here. The default stays at the conventional 0.9; use `--spectral_radius 1.1` for the best value found here.
-
-![spectral radius sweep](results/radius_sweep.png)
-
-### Samples
-
-Generated with `generate.py --prompt "romeo: " --temperature 0.7`, after 2,000 training steps:
-
-```text
-attention-enhanced reservoir (R=160, H=30):
-romeo: them  see;
-as to maling would her but  to be a const soldee so so to man'tis shor thou for me have dor be lase,  thee.
-for not were  of beath ent of siresarly wasture to stup us ball?
-
-transformer (L=8, ffn=72):
-romeo: ieoey eeeyuieeeeoo,
-[eues the he her sorders a comer sord besons,
-to bing so sherundomer that nous and and biest that firer
+```bash
+python benchmark.py --protocol paper --out results/paper
+# or a single model:
+python train.py --protocol paper --model att_reservoir --res 160 --hid 30
 ```
+
+### Quick CPU check (not converged)
+
+`results/quick/` holds a short sanity run from 2 CPU cores:
+- 2,000 steps × 256 windows, about 1.4% of one pass of the paper's schedule
+- lr 3e-3, i.e. 30× the paper's
+- reproduce with `python benchmark.py --protocol quick --out results/quick`
+
+It is useful for checking that everything runs and for comparing reservoir settings with each other. **It is not a fair comparison with the Transformers**, for two reasons:
+
+- **Nothing is converged.** Every model ends at 2.89–3.12 bpc, far above the paper's 2.4–2.6.
+- **The deeper post-LN Transformers fail to train at this learning rate.** With 8–16 post-LayerNorm layers, no warmup and heads of size 1–2 (embedding 16 split into 8–16 heads), the large configurations get stuck predicting only the character frequencies (4.41 bpc). That is an optimisation failure at lr 3e-3, not a property of the model; at the paper's lr 1e-4 they train. `--norm_first` (pre-LN) and `--warmup_steps` are available for experiments beyond the paper's setup.
+
+| model | config | trainable params | test bpc (quick check) |
+|---|---|---|---|
+| Classic reservoir | R=750 | 44,309 | 3.114 |
+| Classic reservoir, ridge readout | R=750 | 44,309 | 3.772 |
+| Attention-enhanced reservoir | R=75, H=13 | 15,464 | 3.056 |
+| Attention-enhanced reservoir | R=100, H=20 | 45,259 | 2.952 |
+| Attention-enhanced reservoir | R=160, H=30 | 155,459 | 2.894 |
+| Transformer | L=4, heads=4, ffn=64 | 15,067 | 3.122 |
+| Transformer | L=8, heads=8, ffn=72 | 30,299 | 3.056 |
+| Transformer | L=8, heads=8, ffn=128 | 45,083 | 3.115 |
+| Transformer | L=8, heads=8, ffn=356 / L=16, heads=16, ffn=256 | 105k / 156k | failed to train at this lr |
+
+The full table, including the v0.1-scaling and lr 1e-3 runs, is in `results/quick/benchmark.md`.
+
+Two observations from the quick check hold regardless of budget, because they compare reservoir settings with each other:
+
+- **The closed-form ridge readout** has the best accuracy among the classic reservoir runs (38.9%) but poor bpc. Least squares on one-hot targets gives badly calibrated probabilities, even after fitting a temperature on validation data.
+- **The spectral radius.** v0.1 divided the reservoir matrices by 0.9 instead of multiplying, so the spectral radius was **≈1.13**, not 0.9. The radius is now set exactly with `--spectral_radius` (default 0.9), and `--legacy_scaling` reproduces the old weights bit for bit. The old value is a good one. In the sweep below (attention-enhanced reservoir, R=150, H=25, quick check), the optimum sits around ρ ≈ 1.1 (2.896 bpc), against 2.920 at 0.9, 3.067 at 0.5 and 2.994 at 1.6. Under the paper's longer training this optimum may shift.
+
+![spectral radius sweep (quick check)](results/quick/radius_sweep.png)
+
+### Multi-timescale reservoir
+
+As in [LAERC](https://github.com/fekoester/LAERC), the reservoir can have a spectrum of timescales. With `--leak_min a_min < 1`, each unit *i* integrates with its own leak rate $a_i$, log-spaced in $[a_\min, 1]$:
+
+$$
+s_t = s_{t-1} + a \odot \big(\tanh(s_{t-1}R + e_t W_{in}) - s_{t-1}\big)
+$$
+
+The fastest units forget within a character and the slowest remember about $1/a_\min$ characters. The random weights are the same as without leak. `benchmark.py` includes multi-timescale variants (`--leak_min 0.1`) of the classic reservoir (R=750) and the attention-enhanced reservoir (R=150, H=25); they have not been run yet.
 
 ## Usage
 
 ```bash
 pip install -r requirements.txt          # torch, numpy, tqdm, matplotlib
 
-python train.py --model att_reservoir --res 150 --hid 25 --epochs 5
+python train.py --model att_reservoir --res 150 --hid 25 --epochs 5        # v0.1 setup (lr 1e-4, batch 1024)
+python train.py --protocol paper --model att_reservoir --res 150 --hid 25  # the paper's shard schedule
+python train.py --model att_reservoir --res 150 --hid 25 --leak_min 0.1   # multi-timescale reservoir
 python train.py --model reservoir --res 750 --readout ridge         # closed-form readout, one pass
-python train.py --model transformer --hid 128 --heads 8 --layers 8 --lr 1e-3
+python train.py --model transformer --hid 128 --heads 8 --layers 8
 python generate.py checkpoints/<run>/model.pt --prompt "to be, or not to be" --length 400
 
 python train_att_reservoir.py            # the original sweeps (extra flags are passed through)
 python train_transformer.py
 python train_reservoir.py --legacy_scaling
-python benchmark.py                      # everything in the Results section
+python benchmark.py --protocol paper     # the paper comparison (GPU recommended)
+python benchmark.py --protocol quick --out results/quick   # the CPU sanity check
 ```
 
 `train.py --help` lists all options. The main ones:
 
 | group | flags |
 |---|---|
-| model | `--model`, `--seq`, `--emb`, `--res`, `--hid`, `--heads`, `--layers` |
-| reservoir | `--spectral_radius`, `--input_scale`, `--legacy_scaling`, `--readout {adam,ridge}` |
-| training | `--epochs`, `--steps_per_epoch`, `--batch`, `--lr`, `--eval_windows`, `--test_windows`, `--seed` |
+| model | `--model`, `--seq`, `--emb`, `--res`, `--hid`, `--heads`, `--layers`, `--dropout`, `--norm_first` |
+| reservoir | `--spectral_radius`, `--input_scale`, `--legacy_scaling`, `--leak_min`, `--readout {adam,ridge}` |
+| training | `--epochs`, `--steps_per_epoch`, `--batch`, `--lr`, `--warmup_steps`, `--eval_windows`, `--test_windows`, `--seed` |
+| schedule and splits | `--protocol paper`, `--shards`, `--shard_epochs`, `--test_frac`, `--val_frac` |
 | data | `--data`, `--no_lowercase` |
 
 Each run writes `checkpoints/<name>/model.pt` (weights, config and vocabulary) and `metrics.json` (per-epoch validation bpc and accuracy, test bpc and accuracy, trainable parameters).
 
-**Data splits** are contiguous. Test is the last 10% of the corpus, as in v0.1. Validation is the 5% just before it, and the epoch with the best validation loss is the one evaluated on test.
+**Data splits** are contiguous. By default, test is the last 10% of the corpus, as in v0.1, and validation is the 5% just before it; the epoch with the best validation loss is the one evaluated on test. `--protocol paper` uses the last sixth for testing, no validation split, and 5 training shards with 5 passes each.
 
 ## Changes in 0.2
 
@@ -111,5 +130,8 @@ Each run writes `checkpoints/<name>/model.pt` (weights, config and vocabulary) a
   - a ridge readout option
 
   The three original scripts are now thin wrappers that run the v0.1 sweeps.
-- **New scripts:** `generate.py` for sampling, and `benchmark.py` for the parameter-matched comparison and the spectral-radius sweep.
+- **The paper's protocol:** `--protocol paper` and the `--shards` / `--shard_epochs` schedule.
+- **Multi-timescale reservoir** (`--leak_min`), as in LAERC.
+- **Transformer options:** `--norm_first`, `--dropout` and `--warmup_steps`. The defaults are unchanged.
+- **New scripts:** `generate.py` for sampling, and `benchmark.py` for the parameter-matched comparison (paper protocol or a quick CPU check) and the spectral-radius sweep.
 - **Housekeeping:** tests, CI and pyproject. The README no longer lists a CONTRIBUTING.md that didn't exist, and the LICENSE has a real name.

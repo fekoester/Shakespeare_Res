@@ -42,13 +42,20 @@ def encode(text: str, char2idx: dict) -> torch.Tensor:
 
 def split_tokens(tokens: torch.Tensor, train_frac: float = 0.9, val_frac: float = 0.05):
     """
-    Contiguous splits. The test split is the last (1 - train_frac) of the corpus, as in v0.1; the
-    validation split is the last val_frac of the corpus before it (taken out of the old training part).
+    Contiguous splits. The test split is the last (1 - train_frac) of the corpus (0.1 as in v0.1, 1/6
+    in the paper); the validation split is the last val_frac of the corpus before it (val_frac=0: none).
     """
     n = len(tokens)
     test_start = int(n * train_frac)
     val_start = int(n * (train_frac - val_frac))
     return tokens[:val_start], tokens[val_start:test_start], tokens[test_start:]
+
+
+def shard_tokens(tokens: torch.Tensor, n_shards: int):
+    """Split the training tokens into n contiguous shards (n <= 1: one shard)."""
+    n_shards = max(1, int(n_shards))
+    edges = [len(tokens) * i // n_shards for i in range(n_shards + 1)]
+    return [tokens[edges[i]:edges[i + 1]] for i in range(n_shards)]
 
 
 def window_batch(tokens: torch.Tensor, starts: torch.Tensor, seq_len: int):
